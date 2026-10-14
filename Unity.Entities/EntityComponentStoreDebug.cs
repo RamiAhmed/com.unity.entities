@@ -336,6 +336,8 @@ namespace Unity.Entities
             if (HasComponent(entity, componentType, out var entityExists))
                 return;
 
+            LogMissingComponentInBurst(entity, componentType.TypeIndex, entityExists);
+
             if (!entityExists)
                 throw new ArgumentException("The entity does not exist." + AppendDestroyedEntityRecordError(entity));
 
@@ -350,6 +352,8 @@ namespace Unity.Entities
                 var entity = entities[i];
                 if (HasComponent(entity, componentType, out var entityExists))
                     continue;
+
+                LogMissingComponentInBurst(entity, componentType.TypeIndex, entityExists);
 
                 if (!entityExists)
                     throw new ArgumentException("The entity does not exist."  + AppendDestroyedEntityRecordError(entity));
@@ -369,6 +373,8 @@ namespace Unity.Entities
         {
             if (Hint.Likely(HasComponent(entity, componentTypeIndex, ref typeLookupCache, out var entityExists)))
                 return;
+
+            LogMissingComponentInBurst(entity, componentTypeIndex, entityExists);
 
             if (Hint.Unlikely(!entityExists))
                 throw new ArgumentException("The entity does not exist." + AppendDestroyedEntityRecordError(entity));
@@ -926,6 +932,39 @@ namespace Unity.Entities
                 throw new System.ArgumentException(
                     $"Component Enabled Bits APIs (SetComponentEnabled, IsComponentEnabled, etc) can not be called with a component type ({typeIndex}) that does not implement IEnableableComponent");
         }
+
+        // Balrog: Burst keeps none of an exception's message - in a player build it reports only the name of the method that
+        // built it, then aborts - so a failed AssertEntityHasComponent (e.g. during ECB playback) is impossible to attribute
+        // to a component type from a crash report. Log the details first: a Debug.LogError of fixed strings and numbers does
+        // survive Burst and lands in the player log and in crash-report breadcrumbs. Only in Burst, where the message is
+        // otherwise lost; in managed code the exception says it all, and an extra error log would fail tests that expect
+        // the throw.
+        static void LogMissingComponentInBurst(Entity entity, TypeIndex typeIndex, bool entityExists)
+        {
+            if (!IsRunningInBurst())
+                return;
+
+            // TypeInfo.DebugTypeName is empty without DEBUG, but the names table is populated in every build
+            var typeName = new FixedString512Bytes();
+            typeName.CopyFromTruncated(*(TypeManager.GetTypeNamesPointer() + typeIndex.Index));
+            var stableTypeHash = TypeManager.GetTypeInfo(typeIndex).StableTypeHash;
+            var typeIndexValue = typeIndex.Value;
+
+            if (entityExists)
+                UnityEngine.Debug.LogError($"AssertEntityHasComponent failed: component {typeName} (TypeIndex {typeIndexValue}, StableTypeHash {stableTypeHash}) has not been added to Entity({entity.Index}:{entity.Version}).");
+            else
+                UnityEngine.Debug.LogError($"AssertEntityHasComponent failed: Entity({entity.Index}:{entity.Version}) does not exist (expected component {typeName}, TypeIndex {typeIndexValue}, StableTypeHash {stableTypeHash}).");
+        }
+
+        static bool IsRunningInBurst()
+        {
+            var isBurst = true;
+            SetFalseIfManaged(ref isBurst);
+            return isBurst;
+        }
+
+        [BurstDiscard]
+        static void SetFalseIfManaged(ref bool value) => value = false;
 
         internal static string AppendDestroyedEntityRecordError(Entity e)
         {
